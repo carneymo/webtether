@@ -1,24 +1,57 @@
+import {Checker} from "./Checker";
+import { ElasticSearch } from "../utils/elasticsearch";
+
 const Utils = require("../utils/util").Utils;
+const Redis = require('ioredis');
 
 /**
  * Redis Checker
  */
-export class RedisChecker {
-    /**
-     * Redis Check
-     * @param options
-     */
-    public redisCheck(options: object) {
-        let success = false;
-        let startTime = new Date().getTime();
-        const Redis = require('ioredis');
-        let redis = new Redis(options);
+export class RedisChecker extends Checker {
 
-        Redis.Command.setReplyTransformer("info", (result) => {
+    protected index: string;
+    protected es: ElasticSearch;
+    protected redis: any;
+    protected options: any;
+
+    /**
+     * Constructor
+     * @param config
+     */
+    constructor(config: any) {
+        super();
+        this.index = config.client_id;
+        this.clientId = config.client_id;
+
+        this.options = {
+            host: config.host,
+            port: config.port,
+            family: 4,
+            password: config.secret_key
+        };
+        this.transformRedis();
+    }
+
+    /**
+     * Transform Redis
+     *
+     * Transformation takes values returned and changes
+     * their structure to fit.
+     */
+    public transformRedis() {
+        this.transformInfo();
+    }
+
+    /**
+     * Transform Info
+     * Returns big long string with "\n\r" for each config line item.
+     */
+    protected transformInfo() {
+        Redis.Command.setReplyTransformer("info", function (result) {
             let obj = {};
             let lines = result.split("\n");
             let totalKeys = 0;
-            lines.forEach((element, index, lines) => {
+            lines.forEach((element) => {
                 if (element.includes(':')) {
                     let key = element.split(':')[0];
                     let value = element.split(':')[1].replace("\r", "");
@@ -32,32 +65,49 @@ export class RedisChecker {
                     obj[key] = value;
                 }
             });
+            obj['query_time'] = new Date().getTime();
             obj['total_keys'] = totalKeys;
             return obj;
         });
+    }
 
-        redis.on('connect', () => {
-            // Attempting to connect, start timer for latency check
+    /**
+     * Redis Check
+     */
+    public check() {
+        let success = false;
+        let startTime = new Date().getTime();
+        let latency = 0;
+
+        this.redis = new Redis(this.options);
+
+        // Attempting to connect, start timer for latency check
+        this.redis.on('connect', () => {
             startTime = new Date().getTime();
         });
 
-        redis.on('ready', () => {
+        // Once connected, 'ready' signal sent
+        this.redis.on('ready', () => {
             // End latency check once we're connected
             let stopTime = new Date().getTime();
-            let diff = stopTime - startTime;
-            console.log("Latency: " + diff + " ms");
+            latency = stopTime - startTime;
+            console.log("Latency: " + latency + " ms");
         });
 
-        redis.ping((err, result) => {
+        // Ping sent to ensure connection
+        let pingStart = new Date().getTime();
+        this.redis.ping((err, result) => {
             if (result === "PONG") {
-                success = true;
-                console.log("Redis connected.");
-                redis.info("all", (err, result) => {
+                console.log("PING latency: " + ((new Date().getTime()) - pingStart));
+                this.redis.info("all", (err, result) => {
                     if (err) {
                         console.log("Error: " + err);
                     }
                     else {
-                        console.log("Port: " + result.tcp_port);
+                        result.latency = latency;
+                        if(this.store(result)) {
+                            console.log("Indexed redis reply");
+                        }
                     }
                 });
             }
